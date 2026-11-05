@@ -1,0 +1,13 @@
+.env
+logs/
+nginx.conf.compiled
+/opds-1.2/
+/build/
+/library/
+/covers/
+.venv/
+/opds/
+/opds.staging/
+/opds.previous/
+*.md
+/scripts

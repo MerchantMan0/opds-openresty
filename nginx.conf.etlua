@@ -1,0 +1,116 @@
+<%
+local lfs = require("lfs")
+local info = lfs.attributes(".")
+local function account(database, id)
+   local pipe = assert(io.popen("getent " .. database .. " " .. tostring(id)))
+   local line = pipe:read("*l")
+   pipe:close()
+   return assert(line and line:match("^([^:]+)"), "no " .. database .. " entry for " .. tostring(id))
+end
+local owner = account("passwd", info.uid)
+local group = account("group", info.gid)
+local cache_control = "public, max-age=" .. tostring(response_ttl) .. ", stale-while-revalidate=86400"
+%>
+env REDIS_HOST;
+env REDIS_PORT;
+env REDIS_PASSWORD;
+env REDIS_DB;
+env REDIS_POOL_SIZE;
+env REDIS_KEEPALIVE;
+env REDIS_INDEX;
+env REDIS_CATALOG;
+
+user <%- owner %> <%- group %>;
+
+worker_processes <%- num_workers %>;
+error_log stderr notice;
+daemon off;
+pid logs/nginx.pid;
+
+events {
+  worker_connections 1024;
+}
+
+http {
+  include mime.types;
+  sendfile on;
+  tcp_nopush on;
+  lua_package_path "./?.lua;./build/?.lua;;";
+  lua_package_cpath ";;";
+  lua_socket_pool_size <%- redis.pool_size %>;
+  lua_socket_keepalive_timeout <%- redis.keepalive %>s;
+
+  init_by_lua_block {
+    -- lpeg assigns a global when it loads
+    -- that reload Lapis and trips the global-write guard
+    require("lpeg")
+    require("lapis.config").get()
+  }
+
+  server {
+    listen <%- port %>;
+    lua_code_cache <%- code_cache %>;
+
+    location /static/ {
+      alias static/;
+    }
+
+    location /favicon.ico {
+      alias static/favicon.ico;
+    }
+<% if opds_roots[1] then %>
+    location = / {
+      return 301 <%- opds_roots[1].prefix %>;
+    }
+<% end %>
+<% for _, dir in ipairs(file_dirs) do %>
+    location <%- dir.prefix %> {
+      alias <%- dir.path %>;
+    }
+<% end %>
+<% for _, dir in ipairs(image_dirs) do %>
+    location <%- dir.prefix %> {
+      alias <%- dir.path %>;
+    }
+<% end %>
+<% for _, root in ipairs(opds_roots) do %>
+<% for _, location in ipairs(root.locations) do %>
+    location ~ <%- location.pattern %> {
+      alias <%- root.path %>$1;
+      types { }
+      default_type "<%- location.type %>";
+      gzip on;
+      gzip_vary on;
+      gzip_min_length 1;
+      gzip_types *;
+      etag on;
+      add_header Cache-Control "<%- cache_control %>";
+    }
+<% end %>
+    location ~ <%- root.deny %> {
+      if (-d <%- root.path %>$1) {
+        return 301 $uri/$is_args$args;
+      }
+      return 404;
+    }
+
+    location = <%- root.bare %> {
+      return 301 <%- root.prefix %>;
+    }
+<% for _, name in ipairs({ "search", "browse" }) do %>
+    location = <%- root.prefix %><%- name %> {
+      add_header Cache-Control "<%- cache_control %>";
+      content_by_lua_block {
+        require("lapis").serve("app")
+      }
+    }
+<% end %>
+
+    location <%- root.prefix %> {
+      alias <%- root.path %>;
+      index <%- root.index %>;
+      autoindex off;
+    }
+<% end %>
+  }
+}
